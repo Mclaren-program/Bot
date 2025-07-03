@@ -1,11 +1,11 @@
-mport discord
+import discord
 import random
 import json
 import datetime
 from preguntas import preguntas
 from discord.ext import commands
 
-Token = "TOKEN" 
+Token = ""
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -20,12 +20,10 @@ ARCHIVO_ESTADISTICAS = "datos_estadisticas.json"
 ARCHIVO_EVENTOS = "datos_eventos.json"
 ARCHIVO_LOGROS = "datos_logros.json"
 
-# Evento on_ready para confirmar que el bot está listo
 @client.event
 async def on_ready():
     print(f"✅ El bot está en línea como {client.user}")
 
-# Cargar datos
 def cargar_datos(ruta):
     try:
         with open(ruta, "r") as f:
@@ -65,123 +63,113 @@ def obtener_nivel(xp):
     else:
         return 6
 
-@client.command(name="tienda")
-async def ver_tienda(ctx):
-    mensaje = "**🛒 TIENDA DE ÍTEMS DISPONIBLES**\n"
-    for item, info in tienda.items():
-        mensaje += f"🔹 **{item}** - {info['precio']} monedas → {info['desc']}\n"
-    await ctx.send(mensaje)
+@client.command(name="trivia_multi")
+async def trivia_multi(ctx, *jugadores: discord.Member):
+    jugadores = list(set([ctx.author] + list(jugadores)))
+    puntuaciones_partida = {j: 0 for j in jugadores}
+    preguntas_random = random.sample(list(preguntas.items()), 10)
 
-@client.command(name="comprar")
-async def comprar_item(ctx, item: str):
+    await ctx.send("🎮 ¡Trivia multijugador iniciada! Participantes: " + ", ".join([j.display_name for j in jugadores]))
+
+    for i, (pregunta, respuesta) in enumerate(preguntas_random, 1):
+        await ctx.send(f"❓ **Pregunta {i}/10:** {pregunta}")
+
+        respondieron = set()
+
+        def check(m):
+            return m.author in jugadores and m.channel == ctx.channel and m.author not in respondieron
+
+        try:
+            while len(respondieron) < len(jugadores):
+                msg = await client.wait_for("message", timeout=30.0, check=check)
+                respondieron.add(msg.author)
+                if msg.content.lower().strip() == respuesta.lower().strip():
+                    puntuaciones_partida[msg.author] += 1
+                    await ctx.send(f"✅ {msg.author.display_name} respondió correctamente!")
+                else:
+                    await ctx.send(f"❌ {msg.author.display_name} se equivocó.")
+        except:
+            await ctx.send("⏰ Tiempo agotado para esta pregunta.")
+
+    resultados = "🏁 **Trivia finalizada. Resultados:**\n"
+    for jugador, pts in sorted(puntuaciones_partida.items(), key=lambda x: x[1], reverse=True):
+        usuario = str(jugador.id)
+        xp_ganado = pts * 10
+        monedas_ganadas = pts * 2
+
+        puntuaciones[usuario] = puntuaciones.get(usuario, 0) + pts
+        niveles_xp[usuario] = niveles_xp.get(usuario, 0) + xp_ganado
+        monedas[usuario] = monedas.get(usuario, 0) + monedas_ganadas
+
+        resultados += f"{jugador.display_name}: {pts} pts | +{xp_ganado} XP | +{monedas_ganadas} monedas\n"
+
+    guardar_datos(ARCHIVO_PUNTOS, puntuaciones)
+    guardar_datos(ARCHIVO_XP, niveles_xp)
+    guardar_datos(ARCHIVO_MONEDAS, monedas)
+
+    await ctx.send(resultados)
+
+@client.command(name="trivia")
+async def trivia(ctx):
     usuario = str(ctx.author.id)
-    item = item.lower()
-    if item not in tienda:
-        await ctx.send("❌ Ese ítem no existe en la tienda.")
-        return
+    preguntas_random = random.sample(list(preguntas.items()), 10)
+    puntos = 0
+    xp_extra = 0
+    monedas_ganadas = 0
 
-    precio = tienda[item]["precio"]
-    saldo = monedas.get(usuario, 0)
+    doble_xp = inventario.get(usuario, {}).get("doble_xp", 0) > 0
+    if doble_xp:
+        inventario[usuario]["doble_xp"] -= 1
+        await ctx.send("⚡ ¡Usaste 'doble_xp'! Ganarás el doble de experiencia en esta trivia.")
 
-    if saldo < precio:
-        await ctx.send("❌ No tienes suficientes monedas.")
-        return
+    await ctx.send("🎯 ¡Comenzamos la trivia individual! Tienes 30 segundos por pregunta.")
 
-    monedas[usuario] = saldo - precio
-    inventario.setdefault(usuario, {}).setdefault(item, 0)
-    inventario[usuario][item] += 1
+    for i, (pregunta, respuesta) in enumerate(preguntas_random, start=1):
+        await ctx.send(f"❓ Pregunta {i}/10: {pregunta}")
 
+        def check(m):
+            return m.author == ctx.author and m.channel == ctx.channel
+
+        try:
+            msg = await client.wait_for("message", timeout=30.0, check=check)
+            if msg.content.lower().strip() == respuesta.lower().strip():
+                await ctx.send("✅ ¡Correcto!")
+                puntos += 1
+                xp_extra += 10
+                monedas_ganadas += 2
+            else:
+                if inventario.get(usuario, {}).get("reintentar", 0) > 0:
+                    inventario[usuario]["reintentar"] -= 1
+                    await ctx.send("🔁 Has usado 'reintentar'. Responde nuevamente:")
+                    try:
+                        msg2 = await client.wait_for("message", timeout=15.0, check=check)
+                        if msg2.content.lower().strip() == respuesta.lower().strip():
+                            await ctx.send("✅ ¡Correcto en el reintento!")
+                            puntos += 1
+                            xp_extra += 10
+                            monedas_ganadas += 2
+                            continue
+                    except:
+                        pass
+                await ctx.send(f"❌ Incorrecto. La respuesta correcta era: {respuesta}")
+        except:
+            await ctx.send("⏰ Se acabó el tiempo para esta pregunta.")
+
+    if doble_xp:
+        xp_extra *= 2
+
+    puntuaciones[usuario] = puntuaciones.get(usuario, 0) + puntos
+    niveles_xp[usuario] = niveles_xp.get(usuario, 0) + xp_extra
+    monedas[usuario] = monedas.get(usuario, 0) + monedas_ganadas
+
+    guardar_datos(ARCHIVO_PUNTOS, puntuaciones)
+    guardar_datos(ARCHIVO_XP, niveles_xp)
     guardar_datos(ARCHIVO_MONEDAS, monedas)
     guardar_datos(ARCHIVO_INVENTARIO, inventario)
 
-    await ctx.send(f"✅ Compraste **{item}**. ¡Gracias por tu compra!")
-
-@client.command(name="perfil")
-async def ver_perfil(ctx):
-    usuario = str(ctx.author.id)
-    puntos = puntuaciones.get(usuario, 0)
-    xp = niveles_xp.get(usuario, 0)
-    nivel = obtener_nivel(xp)
-    saldo = monedas.get(usuario, 0)
-    invent = inventario.get(usuario, {})
-    user_logros = logros.get(usuario, [])
-
-    msg = f"📋 **Perfil de {ctx.author.name}**\n"
-    msg += f"🏅 Nivel: {nivel} ({xp} XP)\n"
-    msg += f"🎯 Puntos totales: {puntos}\n"
-    msg += f"💰 Monedas: {saldo}\n"
-    msg += "🎒 Inventario:\n"
-    if invent:
-        for k, v in invent.items():
-            msg += f"  - {k}: {v}\n"
-    else:
-        msg += "  (Vacío)\n"
-    msg += "🏆 Logros desbloqueados:\n"
-    if user_logros:
-        for logro in user_logros:
-            msg += f"  - {logro}\n"
-    else:
-        msg += "  (Ninguno aún)\n"
-    await ctx.send(msg)
-
-@client.command(name="ayuda")
-async def mostrar_ayuda(ctx):
-    mensaje = (
-        "**🆘 COMANDOS DISPONIBLES:**\n"
-        "👉 `#trivia` - Inicia una partida de trivia individual\n"
-        "👉 `#perfil` - Muestra tu progreso, nivel, XP, monedas e inventario\n"
-        "👉 `#tienda` - Muestra los ítems que puedes comprar\n"
-        "👉 `#comprar <ítem>` - Compra un ítem de la tienda\n"
-        "👉 `#reset` - Reinicia tu perfil desde cero (confirmación requerida)\n"
-        "👉 `#evento` - Consulta tu desafío diario\n"
-    )
-    await ctx.send(mensaje)
-
-@client.command(name="evento")
-async def evento_diario(ctx):
-    usuario = str(ctx.author.id)
-    hoy = str(datetime.date.today())
-    eventos.setdefault(usuario, {})
-
-    if eventos[usuario].get("fecha") != hoy:
-        eventos[usuario] = {
-            "fecha": hoy,
-            "progreso": 0,
-            "meta": 5,
-            "completado": False
-        }
-        guardar_datos(ARCHIVO_EVENTOS, eventos)
-
-    evento = eventos[usuario]
-    estado = "✅ Completado" if evento["completado"] else f"{evento['progreso']}/{evento['meta']}"
-    await ctx.send(f"""🎯 Desafío del día: Responde correctamente a 5 preguntas.
-📆 Fecha: {hoy}
-📊 Progreso: {estado}""")
-
+    await ctx.sendf("🏁 Has completado la trivia")
+    Respuestas_correctas: {puntos}/10 # type: ignore
+    XP_ganado: {xp_extra}
+    Monedas_ganadas: {monedas_ganadas}
 
 client.run("")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Marimo
-marimo/_static/
-marimo/_lsp/
-__marimo__/
